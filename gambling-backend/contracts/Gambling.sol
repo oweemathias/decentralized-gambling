@@ -213,7 +213,7 @@ contract Gambling {
     }
 
     // ========== GET PENDING PROPOSALS FOR FRONTEND ==========
-   function getPendingProposalsFor(address viewer)
+ function getPendingProposalsFor(address viewer)
     external
     view
     returns (
@@ -229,9 +229,12 @@ contract Gambling {
     uint256 len = pendingProposals.length;
     uint256 count = 0;
 
-    // Count only unconfirmed proposals
+    // Count only unconfirmed proposals that have no opponent and not canceled
     for (uint256 i = 0; i < len; i++) {
-        if (!pendingProposals[i].isConfirmed) count++;
+        MatchProposal memory p = pendingProposals[i];
+        if (!p.isConfirmed && p.opponent == address(0) && !proposalCanceled[i]) {
+            count++;
+        }
     }
 
     indexes = new uint256[](count);
@@ -245,7 +248,7 @@ contract Gambling {
     uint256 j = 0;
     for (uint256 i = 0; i < len; i++) {
         MatchProposal memory p = pendingProposals[i];
-        if (p.isConfirmed || p.opponent != address(0)) continue;
+        if (p.isConfirmed || p.opponent != address(0) || proposalCanceled[i]) continue;
 
         indexes[j] = i;
         proposers[j] = p.proposer;
@@ -253,28 +256,22 @@ contract Gambling {
         gameTypes[j] = p.gameType;
         isConfirmeds[j] = p.isConfirmed;
 
-        // Read pairingRequests into locals
         PairingRequest memory reqViewer = pairingRequests[viewer];
         PairingRequest memory reqProposer = pairingRequests[p.proposer];
 
-        // ✅ viewerSent: viewer explicitly requested to pair with this proposal
         bool viewerSent = (
             reqViewer.isPending &&
             reqViewer.matchProposalIndex == i &&
             reqViewer.opponent == p.proposer
         );
 
-        // ✅ viewerReceived: viewer is the proposer being targeted by someone else
         bool viewerReceived = (
             reqProposer.isPending &&
             reqProposer.matchProposalIndex == i &&
             reqProposer.opponent == viewer
         );
 
-        // ✅ Record relationship context between viewer and this proposal
         hasPendingPairings[j] = viewerSent || viewerReceived;
-
-        // ✅ "isOpponents" true means viewer is the challenger (sent request)
         isOpponents[j] = viewerSent;
 
         j++;

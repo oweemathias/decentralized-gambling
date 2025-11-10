@@ -1,31 +1,12 @@
 // src/helpers/getPendingProposals.js
 import { ZeroAddress } from "ethers";
 
-// helper: try to find an address-like field in the returned struct/tuple
-function findAddressInStruct(raw) {
-  try {
-    // If it's an object with named props, scan them
-    if (raw && typeof raw === "object") {
-      for (const k of Object.keys(raw)) {
-        const v = raw[k];
-        if (typeof v === "string" && v.toLowerCase().startsWith("0x") && v.length >= 42) {
-          return v.toLowerCase();
-        }
-      }
-      // If it's an array-like (ethers returns indices), check numeric keys
-      for (let i = 0; i < Object.keys(raw).length; i++) {
-        const v = raw[i];
-        if (typeof v === "string" && v.toLowerCase().startsWith("0x") && v.length >= 42) {
-          return v.toLowerCase();
-        }
-      }
-    }
-  } catch (e) {
-    // ignore
-  }
-  return null;
-}
-
+/**
+ * Robust getPendingProposals:
+ * - Uses on-chain pendingProposals(index) to decide pairing/visibility
+ * - Skips ZeroAddress / paired / confirmed proposals
+ * - Dedupes by index
+ */
 export const getPendingProposals = async (contract, viewerRaw) => {
   if (!contract) throw new Error("Contract not available");
   if (!viewerRaw) throw new Error("Viewer address is missing");
@@ -43,34 +24,7 @@ export const getPendingProposals = async (contract, viewerRaw) => {
       isOpponents,
     ] = await contract.getPendingProposalsFor(viewer);
 
-    const proposals = [];
-
-    // Build base proposals array
-    for (let i = 0; i < indexes.length; i++) {
-      const indexNum = Number(indexes[i]);
-      const proposer = (proposers[i] || "").toLowerCase();
-      const isConfirmed = Boolean(isConfirmeds[i]);
-      const hasPending = Boolean(hasPendingPairings[i]);
-
-      if (!isConfirmed) {
-        proposals.push({
-          matchProposalIndex: indexNum,
-          proposer,
-          stake: stakes[i],
-          gameType: gameTypes[i] || "Unknown",
-          isConfirmed,
-          hasPendingPairing: hasPending,
-          isOpponent: Boolean(isOpponents[i]),
-          isChallenger: false,
-          waitingForOpponent: false,
-          awaitingResponse: false,
-          challenger: null,
-          isPaired: false, // will compute below
-        });
-      }
-    }
-
-    // Read viewer pairingRequests once
+    // read viewer pairingRequests once
     let viewerReq = { isPending: false, matchProposalIndex: null, opponent: null };
     try {
       const rawViewerReq = await contract.pairingRequests(viewer);
@@ -87,25 +41,78 @@ export const getPendingProposals = async (contract, viewerRaw) => {
     }
     console.log("🛰 viewerReq:", viewerReq);
 
-    // If viewer has a match index but the proposal isn't in list, try to fetch it (inject)
+    const proposals = [];
+
+    // Iterate returned indexes and consult on-chain to be 100% sure
+    for (let i = 0; i < indexes.length; i++) {
+      const idx = Number(indexes[i]);
+
+      // try read on-chain latest struct for this index (best source of truth)
+      let latest = null;
+      try {
+        latest = await contract.pendingProposals(idx);
+      } catch (err) {
+        console.warn("⚠ Could not read pendingProposals(index):", idx, err);
+        // fall back to arrays returned by getPendingProposalsFor
+      }
+
+      // resolve proposer/opponent/isConfirmed robustly
+      const proposerFromLatest = latest ? String(latest.proposer ?? latest[0] ?? "").toLowerCase() : (String(proposers[i] ?? "")).toLowerCase();
+      const opponentFromLatest = latest
+        ? (latest.opponent !== undefined ? String(latest.opponent).toLowerCase() : (latest[1] !== undefined ? String(latest[1]).toLowerCase() : null))
+        : null;
+      const isConfirmedFromLatest = latest
+        ? (latest.isConfirmed !== undefined ? Boolean(latest.isConfirmed) : (latest[4] !== undefined ? Boolean(latest[4]) : false))
+        : Boolean(isConfirmeds[i]);
+
+      // Defensive checks: skip invalid / already paired / confirmed entries
+      if (!proposerFromLatest || proposerFromLatest === ZeroAddress) {
+        console.warn("⚠ Skipping invalid proposer for index:", idx, proposerFromLatest);
+        continue;
+      }
+      if ((opponentFromLatest && opponentFromLatest !== ZeroAddress) || isConfirmedFromLatest === true) {
+        // Already paired or confirmed on-chain — ignore it for the "confirm" UI
+        console.log("🔒 Skipping paired/confirmed index:", idx, { opponentFromLatest, isConfirmedFromLatest });
+        continue;
+      }
+
+      // build normalized entry (prefer on-chain latest values when available)
+      const entry = {
+        matchProposalIndex: idx,
+        proposer: proposerFromLatest,
+        stake: latest ? (latest.stake ?? stakes[i]) : stakes[i],
+        gameType: latest ? (latest.gameType ?? gameTypes[i] ?? "Unknown") : (gameTypes[i] ?? "Unknown"),
+        isConfirmed: isConfirmedFromLatest,
+        hasPendingPairing: latest ? Boolean(latest.hasPendingPairings ?? false) : Boolean(hasPendingPairings[i]),
+        isOpponent: Boolean(isOpponents[i]),
+        // flags to populate next
+        isChallenger: false,
+        waitingForOpponent: false,
+        awaitingResponse: false,
+        challenger: null,
+        isPaired: false, // we've already checked paired above; keep flag for completeness
+      };
+
+      proposals.push(entry);
+    } // end for indexes
+
+    // If viewer has a pairing index that wasn't included above (e.g., helper didn't return it),
+    // attempt to inject it if the on-chain slot exists and is unpaired.
     if (viewerReq.matchProposalIndex != null) {
       const exists = proposals.some((p) => Number(p.matchProposalIndex) === Number(viewerReq.matchProposalIndex));
       if (!exists) {
         try {
           const raw = await contract.pendingProposals(viewerReq.matchProposalIndex);
           const rawProposer = String(raw.proposer ?? raw[0] ?? "").toLowerCase();
-          const rawStake = raw.stake ?? raw[2] ?? raw[3] ?? 0;
-          const rawGameType = raw.gameType ?? raw[4] ?? "Unknown";
+          const rawOpponent = raw.opponent !== undefined ? String(raw.opponent).toLowerCase() : (raw[1] !== undefined ? String(raw[1]).toLowerCase() : null);
+          const rawIsConfirmed = raw.isConfirmed !== undefined ? Boolean(raw.isConfirmed) : (raw[4] !== undefined ? Boolean(raw[4]) : false);
 
-          if (!rawProposer || rawProposer === ZeroAddress) {
-            console.warn("⚠ pendingProposals() returned empty proposer:", raw);
-          } else {
-            // inject: we treat this as the target (even if viewerReq.opponent mismatched)
+          if (rawProposer && rawProposer !== ZeroAddress && !(rawOpponent && rawOpponent !== ZeroAddress) && rawIsConfirmed !== true) {
             const injected = {
               matchProposalIndex: Number(viewerReq.matchProposalIndex),
               proposer: rawProposer,
-              stake: rawStake,
-              gameType: rawGameType || "Unknown",
+              stake: raw.stake ?? 0,
+              gameType: raw.gameType ?? "Unknown",
               isConfirmed: false,
               hasPendingPairing: true,
               isOpponent: false,
@@ -116,46 +123,34 @@ export const getPendingProposals = async (contract, viewerRaw) => {
               isPaired: false,
             };
             proposals.unshift(injected);
-            console.log("🔁 Injected proposal from pendingProposals():", injected);
+            console.log("🔁 Injected missing target proposal for challenger view:", injected);
+          } else {
+            console.log("ℹ Not injecting viewer target; slot is paired/invalid:", { rawProposer, rawOpponent, rawIsConfirmed });
           }
         } catch (err) {
-          console.warn("⚠ Could not fetch missing proposal via pendingProposals():", err);
+          console.warn("⚠ Could not fetch missing proposal via pendingProposals() for viewer index:", viewerReq.matchProposalIndex, err);
         }
       }
     }
 
-    // Populate flags and *detect paired* status by reading latest on-chain proposal
+    // Now populate pairing flags from pairingRequests and mark awaiting/response states
     for (const p of proposals) {
       try {
-        // read proposer's pairingRequests entry
         const rawProposerReq = await contract.pairingRequests(p.proposer);
 
-        // CASE A: viewer is challenger
-        if (
-          viewerReq.isPending &&
-          viewerReq.matchProposalIndex === Number(p.matchProposalIndex) &&
-          viewerReq.opponent === p.proposer
-        ) {
+        // CASE A: viewer is challenger (sent request aimed at this proposal)
+        if (viewerReq.isPending && viewerReq.matchProposalIndex === Number(p.matchProposalIndex) && viewerReq.opponent === p.proposer) {
           p.isChallenger = true;
           p.waitingForOpponent = true;
           p.hasPendingPairing = true;
         }
 
-        // CASE B: viewer is proposer who has been challenged
+        // CASE B: viewer is proposer and someone targeted them
         if (viewer === p.proposer) {
           const rawChallengerReq = rawProposerReq;
-          const challengerAddr =
-            rawChallengerReq && rawChallengerReq.opponent
-              ? String(rawChallengerReq.opponent).toLowerCase()
-              : null;
+          const challengerAddr = rawChallengerReq?.opponent ? String(rawChallengerReq.opponent).toLowerCase() : null;
 
-          if (
-            rawChallengerReq &&
-            rawChallengerReq.isPending &&
-            Number(rawChallengerReq.matchProposalIndex) === Number(p.matchProposalIndex) &&
-            challengerAddr &&
-            challengerAddr !== ZeroAddress
-          ) {
+          if (rawChallengerReq && rawChallengerReq.isPending && Number(rawChallengerReq.matchProposalIndex) === Number(p.matchProposalIndex) && challengerAddr && challengerAddr !== ZeroAddress) {
             p.hasPendingPairing = true;
             p.challenger = challengerAddr;
 
@@ -171,33 +166,24 @@ export const getPendingProposals = async (contract, viewerRaw) => {
             }
           }
         }
-
-        // --- NEW: fetch latest on-chain proposal and detect pairing/confirmation robustly ---
-        try {
-          const latest = await contract.pendingProposals(p.matchProposalIndex);
-          console.log("🔎 latest raw for index", p.matchProposalIndex, latest);
-
-          // Try to find an address-like field (opponent) in the returned struct/tuple
-          const actualOpponent = findAddressInStruct(latest);
-          // Try to find an isConfirmed-like boolean
-          // prefer named field if exists:
-          const actualIsConfirmed = (latest && (latest.isConfirmed !== undefined ? latest.isConfirmed : (latest[4] !== undefined ? latest[4] : false)));
-
-          if ((actualOpponent && actualOpponent !== ZeroAddress) || actualIsConfirmed === true) {
-            p.isPaired = true;
-            console.log("🔒 Proposal isPaired detected:", p.matchProposalIndex, { actualOpponent, actualIsConfirmed });
-          }
-        } catch (err) {
-          // best-effort: don't fail whole flow
-          console.warn("Could not read pendingProposals(index) for detection:", p.matchProposalIndex, err);
-        }
       } catch (err) {
-        console.warn("⚠️ Error processing proposal", p.matchProposalIndex, err);
+        console.warn("⚠️ Error processing proposal flags for index", p.matchProposalIndex, err);
       }
-    } // end for proposals
+    }
 
-    // Final visibility: hide proposals that are paired/confirmed
-    const visibleProposals = proposals.filter(
+    // Deduplicate by matchProposalIndex (safety)
+    const seen = new Set();
+    const unique = [];
+    for (const p of proposals) {
+      const k = Number(p.matchProposalIndex);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      unique.push(p);
+    }
+
+    // Final visibility: show viewer's own proposal, ones they challenged, ones awaiting response,
+    // ones waiting for opponent, or open ones with no pending pairing — but never show paired/confirmed entries.
+    const visibleProposals = unique.filter(
       (p) =>
         !p.isConfirmed &&
         !p.isPaired &&
@@ -210,7 +196,9 @@ export const getPendingProposals = async (contract, viewerRaw) => {
         )
     );
 
-    console.log("✅ Final normalized proposals:", visibleProposals);
+    console.log("🧩 Raw proposals before filtering (unique):", unique);
+    console.log("🧩 After normalization (before return):", unique);
+    console.log("✅ Final normalized proposals (visible):", visibleProposals);
     return visibleProposals;
   } catch (err) {
     console.error("❌ Error fetching proposals:", err);

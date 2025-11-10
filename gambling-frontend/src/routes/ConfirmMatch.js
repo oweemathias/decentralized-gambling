@@ -1,4 +1,4 @@
-// ✅ ConfirmMatch.js — Updated with final safety guard
+// ✅ ConfirmMatch.js — Final version with auto-refresh every 10 seconds
 import React, { useContext, useEffect, useState } from "react";
 import { WalletContext } from "./WalletContext";
 import { formatEther } from "ethers";
@@ -8,6 +8,9 @@ export default function ConfirmMatch() {
   const { contract, currentAccount } = useContext(WalletContext);
   const [pendingMatches, setPendingMatches] = useState([]);
   const [status, setStatus] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+
+  const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
 
   const loadMatches = async () => {
     if (!contract || !currentAccount) {
@@ -17,18 +20,10 @@ export default function ConfirmMatch() {
 
     try {
       const raw = await getPendingProposals(contract, currentAccount);
-      console.log("Raw proposals:", raw);
-
       const viewer = currentAccount.toLowerCase();
 
       const normalized = (raw || []).map((m, i) => {
-        const proposer = m.proposer.toLowerCase();
-
-        const isViewerProposer = proposer === viewer;
-        const isOpponent = m.isOpponent === true;
-        const awaitingResponse = m.awaitingResponse === true;
-        const hasPendingPairing = m.hasPendingPairing === true;
-        const waitingForOpponent = m.waitingForOpponent === true;
+        const proposer = (m.proposer || "").toLowerCase();
 
         return {
           key: `${m.matchProposalIndex ?? i}-${proposer}`,
@@ -36,27 +31,49 @@ export default function ConfirmMatch() {
           proposer,
           gameType: m.gameType,
           stake: m.stake,
-          hasPendingPairing,
+          hasPendingPairing: m.hasPendingPairing === true,
           isConfirmed: Boolean(m.isConfirmed),
-          awaitingResponse,
-          waitingForOpponent,
-          isViewerProposer,
-          isOpponent,
+          awaitingResponse: m.awaitingResponse === true,
+          waitingForOpponent: m.waitingForOpponent === true,
+          isViewerProposer: proposer === viewer,
+          isOpponent: m.isOpponent === true,
           challenger: m.challenger,
         };
       });
 
+      // compute visibleMatches using the same rules the UI will use
+      const visibleMatches = normalized.filter((m) => {
+        const shouldShow =
+          !m.isConfirmed &&
+          (!m.hasPendingPairing || m.waitingForOpponent || m.awaitingResponse) &&
+          (!m.challenger || m.challenger === ZERO_ADDR);
+        return shouldShow;
+      });
+
       console.log("✅ Normalized proposals:", normalized);
+      console.log("✅ Visible proposals (for UI):", visibleMatches);
+
       setPendingMatches(normalized);
-      setStatus(`✅ ${normalized.length} open proposal(s)`);
+      setStatus(`✅ ${visibleMatches.length} open proposal(s)`);
+      setLastUpdated(new Date().toLocaleTimeString());
     } catch (e) {
       console.error("Fetch error:", e);
       setStatus("❌ Failed to load proposals");
     }
   };
 
+  // 🔁 Auto-refresh every 10 seconds
   useEffect(() => {
-    if (contract && currentAccount) loadMatches();
+    if (!contract || !currentAccount) return;
+
+    loadMatches(); // initial load
+
+    const interval = setInterval(() => {
+      console.log("🔄 Auto-refreshing proposals...");
+      loadMatches();
+    }, 10000);
+
+    return () => clearInterval(interval);
   }, [contract, currentAccount]);
 
   const handleRequestPairing = async (m) => {
@@ -110,20 +127,32 @@ export default function ConfirmMatch() {
     }
   };
 
-  // 🧠 Belt-and-suspenders: UI guard — never show confirmed matches or paired ones
-  const visibleMatches = pendingMatches.filter(
-    (m) =>
+  // 🧠 Belt-and-suspenders UI guard: compute visibleMatches from state
+  const visibleMatches = pendingMatches.filter((m) => {
+    const shouldShow =
       !m.isConfirmed &&
-      !m.hasPendingPairing &&
-      (!m.challenger || m.challenger === "0x0000000000000000000000000000000000000000")
-  );
+      (!m.hasPendingPairing || m.waitingForOpponent || m.awaitingResponse) &&
+      (!m.challenger || m.challenger === ZERO_ADDR);
+
+    if (!shouldShow) console.log("🚫 Hiding proposal (UI guard):", m);
+    return shouldShow;
+  });
 
   return (
     <div style={{ padding: 20 }}>
       <h2>🎮 Confirm Match</h2>
-      <button onClick={loadMatches} style={{ marginBottom: 15 }}>
-        🔄 Refresh
-      </button>
+
+      <div style={{ marginBottom: 15 }}>
+        <button onClick={loadMatches} style={{ marginRight: 10 }}>
+          🔄 Manual Refresh
+        </button>
+        {lastUpdated && (
+          <span style={{ fontSize: "0.9em", color: "#555" }}>
+            Last updated: {lastUpdated}
+          </span>
+        )}
+      </div>
+
       {status && (
         <p>
           <strong>Status:</strong> {status}
@@ -133,19 +162,8 @@ export default function ConfirmMatch() {
       {visibleMatches.length === 0 ? (
         <p>No open proposals.</p>
       ) : (
-        visibleMatches.map((m, i) => {
+        visibleMatches.map((m) => {
           const safeKey = `${m.matchProposalIndex}-${m.proposer}`;
-
-          console.log("🔍 Proposal flags (frontend render):", {
-            viewer: currentAccount,
-            proposer: m.proposer,
-            isViewerProposer: m.isViewerProposer,
-            isOpponent: m.isOpponent,
-            awaitingResponse: m.awaitingResponse,
-            waitingForOpponent: m.waitingForOpponent,
-            hasPendingPairing: m.hasPendingPairing,
-            challenger: m.challenger,
-          });
 
           if (m.waitingForOpponent) {
             return (
@@ -156,8 +174,7 @@ export default function ConfirmMatch() {
             );
           }
 
-          if (m.awaitingResponse && m.isOpponent && m.hasPendingPairing) {
-            console.log("✅ Showing ACCEPT/DECLINE for:", m.proposer);
+          if (m.awaitingResponse && m.isOpponent) {
             return (
               <div key={safeKey} style={styles.card}>
                 <button
