@@ -1,51 +1,104 @@
-import React, { useState } from "react";
-import { BrowserProvider, Contract, parseEther } from "ethers";
-import contractABI from "../Gambling.json";
+// src/routes/Withdraw.js
+import React, { useContext, useEffect, useState } from "react";
+import { WalletContext } from "./WalletContext";
+import { parseEther, formatEther } from "ethers";
 
-const Withdraw = () => {
+export default function Withdraw() {
+  const { contract, currentAccount } = useContext(WalletContext);
   const [amount, setAmount] = useState("");
+  const [availableBalance, setAvailableBalance] = useState("0");
+  const [status, setStatus] = useState("");
+
+  const fetchAvailableBalance = async () => {
+    if (!contract || !currentAccount) return;
+
+    try {
+      let bal;
+      if (contract.getBalance) {
+        bal = await contract.getBalance(currentAccount);
+      } else {
+        bal = await contract.balances(currentAccount);
+      }
+      setAvailableBalance(formatEther(bal));
+    } catch (err) {
+      console.error("Balance fetch error", err);
+      setAvailableBalance("0");
+    }
+  };
+
+  useEffect(() => {
+    fetchAvailableBalance();
+  }, [contract, currentAccount]);
 
   const handleWithdraw = async () => {
+    if (!contract) {
+      setStatus("⚠️ Connect wallet first");
+      return;
+    }
+    if (!amount) {
+      setStatus("⚠️ Enter an amount");
+      return;
+    }
+
+    let value;
     try {
-      if (!window.ethereum) {
-        alert("Please install MetaMask!");
-        return;
-      }
+      value = parseEther(amount);
+    } catch {
+      setStatus("⚠️ Invalid ETH amount");
+      return;
+    }
 
-      // Connect to provider & signer
-      const provider = new BrowserProvider(window.ethereum);
-      const signer = await provider.getSigner();
+    if (Number(amount) > Number(availableBalance)) {
+      setStatus("⚠️ Amount exceeds available balance");
+      return;
+    }
 
-      // Your deployed contract address
-      const contractAddress = "0x99361bB350D3ac9d3562856ec938dd6072ea46Ef"; // 🔴 replace with actual address
-      const contract = new Contract(contractAddress, contractABI, signer);
-
-      // Convert entered ETH to wei
-      const weiAmount = parseEther(amount);
-
-      // Call withdrawBalance with the amount
-      const tx = await contract.withdrawBalance(weiAmount);
+    try {
+      setStatus("⏳ Withdrawing...");
+      const tx = await contract.withdrawBalance(value);
       await tx.wait();
 
-      alert(`✅ Successfully withdrew ${amount} ETH`);
-    } catch (error) {
-      console.error("Withdraw error:", error);
-      alert("❌ Withdrawal failed – check console for details");
+      await fetchAvailableBalance(); // refresh balance
+
+      setStatus(`✅ Withdrew ${amount} ETH successfully`);
+      setAmount("");
+    } catch (err) {
+      console.error("Withdraw error:", err);
+      const msg =
+        err?.reason ||
+        err?.error?.message ||
+        err?.data?.message ||
+        err?.message ||
+        "Unknown error";
+      setStatus(`❌ Withdrawal failed (${msg})`);
     }
   };
 
   return (
-    <div>
-      <h2>Withdraw Funds</h2>
-      <input
-        type="text"
-        placeholder="Enter amount (ETH)"
-        value={amount}
-        onChange={(e) => setAmount(e.target.value)}
-      />
-      <button onClick={handleWithdraw}>Withdraw</button>
+    <div style={{ padding: 20 }}>
+      <h2>🏧 Withdraw Funds</h2>
+      <p>Current account: {currentAccount || "– not connected –"}</p>
+
+      <div style={{ marginBottom: "1rem" }}>
+        <strong>Available balance:</strong> {availableBalance} ETH
+      </div>
+
+      <div style={{ margin: "1rem 0" }}>
+        <input
+          type="text"
+          placeholder="Amount in ETH"
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+          style={{ marginRight: "0.5rem" }}
+        />
+        <button onClick={handleWithdraw}>Withdraw</button>
+      </div>
+
+      {status && (
+        <p>
+          <strong>Status:</strong> {status}
+        </p>
+      )}
     </div>
   );
-};
-
-export default Withdraw;
+}

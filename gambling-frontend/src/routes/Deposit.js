@@ -1,12 +1,34 @@
 // src/routes/Deposit.js
-import React, { useContext, useState } from "react";
+import React, { useContext, useState, useEffect } from "react";
 import { WalletContext } from "./WalletContext";
-import { parseEther } from "ethers";
+import { parseEther, formatEther } from "ethers";
 
 export default function Deposit() {
   const { contract, currentAccount } = useContext(WalletContext);
   const [amount, setAmount] = useState("");
-  const [status, setStatus]   = useState("");
+  const [status, setStatus] = useState("");
+  const [availableBalance, setAvailableBalance] = useState("0");
+
+  const fetchAvailableBalance = async () => {
+    if (!contract || !currentAccount) return;
+
+    try {
+      let bal;
+      if (contract.getBalance) {
+        bal = await contract.getBalance(currentAccount);
+      } else {
+        bal = await contract.balances(currentAccount);
+      }
+      setAvailableBalance(formatEther(bal));
+    } catch (err) {
+      console.error("Balance fetch error", err);
+      setAvailableBalance("0");
+    }
+  };
+
+  useEffect(() => {
+    fetchAvailableBalance();
+  }, [contract, currentAccount]);
 
   const handleDeposit = async () => {
     if (!contract) {
@@ -30,6 +52,9 @@ export default function Deposit() {
       setStatus("⏳ Depositing...");
       const tx = await contract.fundPlayer({ value });
       await tx.wait();
+
+      await fetchAvailableBalance(); // refresh balance
+
       setStatus(`✅ Deposited ${amount} ETH successfully`);
       setAmount("");
     } catch (err) {
@@ -48,6 +73,10 @@ export default function Deposit() {
     <div style={{ padding: 20 }}>
       <h2>💰 Fund Your Balance</h2>
       <p>Current account: {currentAccount || "– not connected –"}</p>
+
+      <div style={{ marginBottom: "1rem" }}>
+        <strong>Available for staking:</strong> {availableBalance} ETH
+      </div>
 
       <div style={{ margin: "1rem 0" }}>
         <input
