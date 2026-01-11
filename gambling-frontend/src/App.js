@@ -14,12 +14,18 @@ import OraclePanel from "./routes/OraclePanel";
 import AIInspectionPanel from "./routes/AIInspectionPanel";
 import MatchHistory from "./routes/MatchHistory";
 import SetOracle from "./routes/SetOracle";     // ← New!
+import Transactions from "./routes/Transactions";
+
 import NavBar from "./components/NavBar";
+import ProfileIcon from "./components/ProfileIcon"; // ✅ ADD THIS
 
 function App() {
   return (
     <WalletProvider>
       <Router>
+        {/* Profile icon floats above everything */}
+        <ProfileIcon /> {/* ✅ ADD THIS */}
+
         <div style={{ padding: 20 }}>
           <h1>🎰 Decentralized Gambling DApp</h1>
           <NavBar />
@@ -36,6 +42,7 @@ function App() {
             <Route path="/ai-inspection" element={<AIInspectionPanel />} />
             <Route path="/history" element={<MatchHistory />} />
             <Route path="/set-oracle" element={<SetOracle />} /> {/* ← New route */}
+            <Route path="/transactions" element={<Transactions />} />
           </Routes>
         </div>
       </Router>

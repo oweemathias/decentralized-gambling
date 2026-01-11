@@ -55,6 +55,9 @@ contract Gambling {
     event ProposalCanceled(uint256 indexed proposalIndex, address indexed proposer);
     event WinnerDeclared(uint256 indexed proposalIndex, address indexed winner, uint256 payout, uint256 commission);
     event OracleSignerUpdated(address indexed oldSigner, address indexed newSigner);
+    event StakeJoined(uint256 indexed proposalIndex, address indexed opponent, uint256 amount);
+    event MatchLost(uint256 indexed proposalIndex, address indexed loser, uint256 amountLost);
+    event PlayerWithdrawn(address indexed player, uint256 amount);
 
     constructor() {
         owner        = msg.sender;
@@ -127,6 +130,7 @@ contract Gambling {
             });
 
             emit PairingRequested(i, proposer, msg.sender);
+            emit StakeJoined(i, msg.sender, msg.value);
             return;
         }
     }
@@ -420,6 +424,9 @@ contract Gambling {
         require(sentOwner, "Failed to send commission to owner");
 
         emit WinnerDeclared(matchProposalIndex, winner, payout, commission);
+        
+        address loser = (winner == p.proposer) ? p.opponent : p.proposer;
+        emit MatchLost(matchProposalIndex, loser, p.stake);
     }
 
     // ========== OWNER: update oracle signer ==========
@@ -438,6 +445,7 @@ contract Gambling {
         balances[msg.sender] -= amount;
         (bool sent, ) = payable(msg.sender).call{value: amount}("");
         require(sent, "Withdraw failed");
+        emit PlayerWithdrawn(msg.sender, amount);
     }
 
     // ========== FALLBACK / RECEIVE ==========
