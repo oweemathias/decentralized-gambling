@@ -15,6 +15,7 @@ import AIInspectionPanel from "./routes/AIInspectionPanel";
 import MatchHistory from "./routes/MatchHistory";
 import SetOracle from "./routes/SetOracle";     // ← New!
 import Transactions from "./routes/Transactions";
+import Gifts from "./routes/Gifts";
 
 import NavBar from "./components/NavBar";
 import ProfileIcon from "./components/ProfileIcon"; // ✅ ADD THIS
@@ -43,6 +44,7 @@ function App() {
             <Route path="/history" element={<MatchHistory />} />
             <Route path="/set-oracle" element={<SetOracle />} /> {/* ← New route */}
             <Route path="/transactions" element={<Transactions />} />
+            <Route path="/gifts" element={<Gifts />} />
           </Routes>
         </div>
       </Router>

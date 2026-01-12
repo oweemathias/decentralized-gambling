@@ -113,7 +113,16 @@ export default function ProfilePanel({ onClose }) {
       </small>
       <br />
 
-      <small>🎁 Gifts & Rewards</small>
+       <small
+        style={{ cursor: "pointer" }}
+        onClick={() => {
+          onClose();
+          navigate("/Gifts");
+        }}
+      >
+        🎁 Gifts & Rewards
+      </small>
+      <br />
     </div>
   );
 }

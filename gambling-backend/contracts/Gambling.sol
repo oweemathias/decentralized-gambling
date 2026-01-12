@@ -36,6 +36,12 @@ contract Gambling {
         bool isPending;
     }
 
+    struct Rewards {
+        uint256 cashback;
+        uint256 daily;
+        uint256 referral;
+    }
+
     MatchProposal[] public pendingProposals;
     Match[]         public matchHistory;
     mapping(address => uint256) public balances;
@@ -45,6 +51,11 @@ contract Gambling {
     // NEW: track canceled and completed proposals by index (no change to existing struct ABI)
     mapping(uint256 => bool) public proposalCanceled;
     mapping(uint256 => bool) public proposalCompleted;
+
+    mapping(address => Rewards) public rewards;
+    mapping(address => uint256) public lastActiveDay;
+    mapping(address => address) public referrer;
+
 
     event PlayerFunded(address indexed player, uint256 amount);
     event ProposalCreated(uint256 indexed index, address proposer, uint256 stake, string gameType);
@@ -58,6 +69,9 @@ contract Gambling {
     event StakeJoined(uint256 indexed proposalIndex, address indexed opponent, uint256 amount);
     event MatchLost(uint256 indexed proposalIndex, address indexed loser, uint256 amountLost);
     event PlayerWithdrawn(address indexed player, uint256 amount);
+    event RewardGranted(address indexed user, uint256 amount, string kind);
+    event RewardsClaimed(address indexed user, uint256 amount);
+    event ReferrerSet(address indexed user, address indexed referrer);
 
     constructor() {
         owner        = msg.sender;
@@ -91,8 +105,16 @@ contract Gambling {
         }));
 
         emit ProposalCreated(pendingProposals.length - 1, msg.sender, stake, gameType);
-    }
 
+        // referral: if proposer has a referrer, give the referrer a referral bonus
+        address ref = referrer[msg.sender];
+        if (ref != address(0)) {
+            uint256 referralBonus = (stake * 2) / 100; // 2%
+            rewards[ref].referral += referralBonus;
+
+            emit RewardGranted(ref, referralBonus, "referral");
+    }
+}
     // ========== PAIRING LOGIC ==========
    function requestPairing(address proposer, string memory gameType) external payable {
     // find the matching open proposal
@@ -174,8 +196,17 @@ contract Gambling {
         // Emit both: keep old event for backward compatibility; detailed event for new consumers
         emit PairingAccepted(matchProposalIndex, msg.sender);
         emit PairingAcceptedDetailed(matchProposalIndex, p.proposer, msg.sender);
-    }
+        
+        // daily reward to proposer
+        uint256 today = _today();
+        if (lastActiveDay[msg.sender] < today) {
+            uint256 dailyReward = 0.002 ether; // example
+            rewards[msg.sender].daily += dailyReward;
+            lastActiveDay[msg.sender] = today;
 
+            emit RewardGranted(msg.sender, dailyReward, "daily");
+    }
+}
     function declinePairing(uint256 matchProposalIndex) external {
         PairingRequest storage req = pairingRequests[msg.sender];
 
@@ -427,6 +458,11 @@ contract Gambling {
         
         address loser = (winner == p.proposer) ? p.opponent : p.proposer;
         emit MatchLost(matchProposalIndex, loser, p.stake);
+
+        // cashback = 5% of loser stake
+        uint256 cashback = (p.stake * 5) / 100; // 5% cashback
+        rewards[loser].cashback += cashback;
+        emit RewardGranted(loser, cashback, "cashback");
     }
 
     // ========== OWNER: update oracle signer ==========
@@ -436,8 +472,48 @@ contract Gambling {
         oracleSigner = newOracle;
         emit OracleSignerUpdated(old, newOracle);
     }
+    
+    // ========== GIFT AND REWARD FUNCTIONS ==========
+    function _today() internal view returns (uint256) {
+        return block.timestamp / 1 days;
+    }
+    
+    function claimRewards() external {
+        Rewards storage r = rewards[msg.sender];
+
+        uint256 total =
+            r.cashback +
+            r.daily +
+            r.referral;
+
+        require(total > 0, "No rewards to claim");
+
+        r.cashback = 0;
+        r.daily = 0;
+        r.referral = 0;
+
+        balances[msg.sender] += total;
+
+        emit RewardsClaimed(msg.sender, total);
+    }
+    
+    function setReferrer(address _referrer) external {
+        require(referrer[msg.sender] == address(0), "Referrer already set");
+        require(_referrer != msg.sender, "Cannot refer yourself");
+        require(_referrer != address(0), "Invalid referrer");
+
+        referrer[msg.sender] = _referrer;
+        emit ReferrerSet(msg.sender, _referrer);
+    }   
 
     // ========== WITHDRAW PLAYER BALANCE ==========
+    function grantReward(address user, uint256 amount, string calldata kind) external onlyOwner {
+        require(user != address(0), "Invalid user");
+        require(amount > 0, "Invalid amount");
+        balances[user] += amount;
+        emit RewardGranted(user, amount, kind);
+    }
+
     // Allows players to withdraw any unused balances they pre-funded
     function withdrawBalance(uint256 amount) external {
         require(amount > 0, "Amount must be > 0");
