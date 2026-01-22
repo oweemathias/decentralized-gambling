@@ -5,7 +5,7 @@ import gamblingABI from "../Gambling.json";
 
 export const WalletContext = createContext();
 
-const CONTRACT_ADDRESS ="0xfe77c447EC6185846Cffe29Ec13C550cD4B34e5C";
+const CONTRACT_ADDRESS ="0xA844e9f49349Cf950569e6D084949eFf6DD8d837";
 
 export const WalletProvider = ({ children }) => {
   const [provider, setProvider] = useState(null);

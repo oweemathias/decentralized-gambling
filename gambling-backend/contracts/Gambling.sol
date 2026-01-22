@@ -52,6 +52,9 @@ contract Gambling {
     mapping(uint256 => bool) public proposalCanceled;
     mapping(uint256 => bool) public proposalCompleted;
 
+    // NEW: UI-only closed flag (paired/completed) — do not conflate with 'proposalCanceled'
+    mapping(uint256 => bool) public proposalClosed;
+
     mapping(address => Rewards) public rewards;
     mapping(address => uint256) public lastActiveDay;
     mapping(address => address) public referrer;
@@ -224,6 +227,9 @@ contract Gambling {
         // finalize pairing
         p.isConfirmed = true;
 
+        // mark closed for UI so the proposal does not remain visible as "open"
+        proposalClosed[matchProposalIndex] = true;
+
         // Cancel caller's own open proposal (if any) — keep existing behaviour
         for (uint256 i = 0; i < pendingProposals.length; i++) {
             if (
@@ -317,7 +323,7 @@ contract Gambling {
     // Count only unconfirmed proposals that have no opponent and not canceled
     for (uint256 i = 0; i < len; i++) {
         MatchProposal memory p = pendingProposals[i];
-        if (!p.isConfirmed && p.opponent == address(0) && !proposalCanceled[i]) {
+        if (!p.isConfirmed && p.opponent == address(0) && !proposalCanceled[i] && !proposalClosed[i]) {
             count++;
         }
     }
@@ -333,7 +339,7 @@ contract Gambling {
     uint256 j = 0;
     for (uint256 i = 0; i < len; i++) {
         MatchProposal memory p = pendingProposals[i];
-        if (p.isConfirmed || p.opponent != address(0) || proposalCanceled[i]) continue;
+        if (p.isConfirmed || p.opponent != address(0) || proposalCanceled[i] || proposalClosed[i]) continue;
 
         indexes[j] = i;
         proposers[j] = p.proposer;
