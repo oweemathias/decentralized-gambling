@@ -56,6 +56,10 @@ contract Gambling {
     mapping(address => uint256) public lastActiveDay;
     mapping(address => address) public referrer;
 
+    // Track whether stakes for a proposal were reserved (deducted from balances)
+    mapping(uint256 => bool) public proposerStakeReserved;
+    mapping(uint256 => bool) public opponentStakeReserved;
+
 
     event PlayerFunded(address indexed player, uint256 amount);
     event ProposalCreated(uint256 indexed index, address proposer, uint256 stake, string gameType);
@@ -104,6 +108,8 @@ contract Gambling {
             isConfirmed : false
         }));
 
+        uint256 index = pendingProposals.length - 1;
+        proposerStakeReserved[index] = true;
         emit ProposalCreated(pendingProposals.length - 1, msg.sender, stake, gameType);
 
         // referral: if proposer has a referrer, give the referrer a referral bonus
@@ -127,8 +133,15 @@ contract Gambling {
             p.opponent == address(0) &&
             !proposalCanceled[i] &&
             !proposalCompleted[i]
-        ) {
-            require(msg.value == p.stake, "Stake mismatch"); // ✅ opponent sends ETH here
+        ) { 
+             // If user sent ETH with the call, credit it to their internal balance first.
+            // This lets frontends either send value or rely on existing in-contract balance.
+            if (msg.value > 0) {
+                balances[msg.sender] += msg.value;
+            }
+            require(balances[msg.sender] >= p.stake, "Insufficient balance"); // ✅ opponent sends ETH here
+            balances[msg.sender] -= p.stake;  
+            opponentStakeReserved[i] = true;                                                                    
 
             // ✅ Record pairing request under the challenger (msg.sender)
             pairingRequests[msg.sender] = PairingRequest({
@@ -152,7 +165,7 @@ contract Gambling {
             });
 
             emit PairingRequested(i, proposer, msg.sender);
-            emit StakeJoined(i, msg.sender, msg.value);
+            emit StakeJoined(i, msg.sender, p.stake);
             return;
         }
     }
@@ -171,11 +184,47 @@ contract Gambling {
         // Only opponent (not proposer) can accept
         require(msg.sender != p.proposer, "Proposer cannot accept own match");
 
+        // Read any pending pairing request for the caller (challenger)
+        PairingRequest memory req = pairingRequests[msg.sender];
+
+        if (req.isPending && req.matchProposalIndex == matchProposalIndex) {
+            // Requester path: challenger previously called requestPairing()
+            // In that flow requestPairing already reserved the stake (deducted balances[msg.sender]).
+            // Finalize pairing using the actual caller as the opponent.
+            p.opponent = msg.sender;
+        } else {
+            // Direct-accept path: challenger didn't call requestPairing before accepting.
+            // We must reserve their stake now.
+            require(balances[msg.sender] >= p.stake, "Insufficient balance to accept match");
+            balances[msg.sender] -= p.stake;
+            opponentStakeReserved[matchProposalIndex] = true;
+
+            // (Optional) populate pairingRequests so UI can reflect the transient state consistently
+            pairingRequests[msg.sender] = PairingRequest({
+                matchProposalIndex: matchProposalIndex,
+                proposer: p.proposer,
+                opponent: msg.sender,
+                gameType: p.gameType,
+                isAccepted: true,
+                isPending: false
+            });
+
+            pairingRequests[p.proposer] = PairingRequest({
+                matchProposalIndex: matchProposalIndex,
+                proposer: p.proposer,
+                opponent: msg.sender,
+                gameType: p.gameType,
+                isAccepted: true,
+                isPending: false
+            });
+
+            p.opponent = msg.sender;
+        }
+
         // finalize pairing
-        p.opponent = msg.sender;
         p.isConfirmed = true;
 
-        // Cancel caller's own open proposal (if any)
+        // Cancel caller's own open proposal (if any) — keep existing behaviour
         for (uint256 i = 0; i < pendingProposals.length; i++) {
             if (
                 pendingProposals[i].proposer == msg.sender &&
@@ -196,17 +245,17 @@ contract Gambling {
         // Emit both: keep old event for backward compatibility; detailed event for new consumers
         emit PairingAccepted(matchProposalIndex, msg.sender);
         emit PairingAcceptedDetailed(matchProposalIndex, p.proposer, msg.sender);
-        
-        // daily reward to proposer
+
+        // daily reward to the accepting actor (msg.sender)
         uint256 today = _today();
         if (lastActiveDay[msg.sender] < today) {
             uint256 dailyReward = 0.002 ether; // example
             rewards[msg.sender].daily += dailyReward;
             lastActiveDay[msg.sender] = today;
-
             emit RewardGranted(msg.sender, dailyReward, "daily");
+        }
     }
-}
+ 
     function declinePairing(uint256 matchProposalIndex) external {
         PairingRequest storage req = pairingRequests[msg.sender];
 
@@ -239,6 +288,7 @@ contract Gambling {
         proposalCanceled[matchProposalIndex] = true;
         balances[msg.sender] += p.stake;
 
+        proposerStakeReserved[matchProposalIndex] = false;
         emit ProposalCanceled(matchProposalIndex, msg.sender);
     }
 
@@ -439,20 +489,34 @@ contract Gambling {
             isCompleted: true
         }));
 
-        // Compute payouts
+        // Ensure proposer stake was reserved (if not, reserve it now)
+        if (!proposerStakeReserved[matchProposalIndex]) {
+            // proposer stake must be available to reserve now
+            require(balances[p.proposer] >= p.stake, "Proposer missing stake");
+            balances[p.proposer] -= p.stake;
+            proposerStakeReserved[matchProposalIndex] = true;
+        }
+
+        // Ensure opponent stake was reserved (if not, reserve it now)
+        if (!opponentStakeReserved[matchProposalIndex]) {
+            // opponent must be set (p.opponent should not be address(0) because of earlier require)
+            require(balances[p.opponent] >= p.stake, "Opponent missing stake");
+            balances[p.opponent] -= p.stake;
+            opponentStakeReserved[matchProposalIndex] = true;
+        }
+
+        // Both sides' stakes are now reserved inside contract (balances already decreased)
         uint256 total = p.stake * 2;
         uint256 commission = (total * commissionPercentage) / 100;
         uint256 payout = total - commission;
+
 
         // Interactions: transfer payout then commission
         // Note: We rely on the contract holding the proposer's reserved stake (from balances)
         // and the opponent's stake (msg.value when they accepted) — the ETH should already be in contract.
         // Use call to forward gas safely.
-        (bool sentWinner, ) = payable(winner).call{value: payout}("");
-        require(sentWinner, "Failed to send payout to winner");
-
-        (bool sentOwner, ) = payable(owner).call{value: commission}("");
-        require(sentOwner, "Failed to send commission to owner");
+        balances[winner] += payout;
+        balances[owner] += commission;
 
         emit WinnerDeclared(matchProposalIndex, winner, payout, commission);
         
